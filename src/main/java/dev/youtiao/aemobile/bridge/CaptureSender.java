@@ -1,4 +1,4 @@
-package dev.youtiao.aemobile.musicbridge;
+package dev.youtiao.aemobile.bridge;
 
 import net.md_5.bungee.api.CommandSender;
 import net.md_5.bungee.api.chat.BaseComponent;
@@ -10,10 +10,10 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 把 AllMusic 返回给玩家的聊天截获下来，不真的发给玩家。
+ * 捕获命令返回给玩家/控制台的聊天，不真的发出去。
  *
  * <p>在线玩家：权限、分组委托给真实的 ProxiedPlayer，但 sendMessage 只记录。
- * 离线玩家：用请求里的名字构造一个虚拟 sender；权限按 config 的 offline-permissions 放行。
+ * 离线玩家：用一个虚拟 sender（名字 = 请求里的玩家名），权限按 config 的 offline-permissions 放行。
  */
 final class CaptureSender implements CommandSender {
 

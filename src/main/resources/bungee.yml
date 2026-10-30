@@ -1,4 +1,4 @@
-name: AEMobileMusicBridge
-main: dev.youtiao.aemobile.musicbridge.AEMusicBridge
+name: AEMobileBridge
+main: dev.youtiao.aemobile.bridge.AEMobileBridge
 version: 1.0.0
 author: AEMobile

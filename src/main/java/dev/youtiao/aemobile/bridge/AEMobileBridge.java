@@ -1,4 +1,4 @@
-package dev.youtiao.aemobile.musicbridge;
+package dev.youtiao.aemobile.bridge;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -25,7 +25,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -33,36 +32,41 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * App → 后端 mod → 本插件（BC 代理）→ AllMusic 的桥。
+ * AEMobileBridge：代理侧通用命令桥。
  *
- * <p>为什么要在代理上单独做一个插件：AllMusic 的 BC 版命令（/music）只存在于代理进程里，
- * 后端的 Forge mod 根本看不到它。这里开一个 127.0.0.1 的 JSON TCP 端口，后端 mod 转发请求，
- * 本插件用捕获型 CommandSender 执行 /music 命令，把返回的聊天原样回给 App。
+ * <p>后端 mod 通过 127.0.0.1 的 JSON TCP 把「以某个玩家身份执行一条代理命令」的请求发过来，
+ * 本插件用捕获型 CommandSender 执行，把命令返回的聊天原样回给 App —— 不发到公屏。
  *
- * <p>离线玩家也能用：用一个虚拟 CommandSender（名字 = 玩家名，权限按 config 放行），
- * search/list/vote/点歌 都会走 AllMusic 的命令逻辑；如果某个子命令要求真实 ProxiedPlayer，
- * 会返回 AllMusic 的报错文本，App 原样展示。
+ * <p>目前只开了 {@code music} 这个命令根（AllMusic 的 /music）；以后要点歌以外的功能，
+ * 把新的命令根加到 config 的 {@code allow-commands} 即可，协议不用改。
+ * 搜歌这类异步命令可以用 {@code captureMs} 指定收集窗口（默认 800ms，搜歌由 mod 传 3500ms）。
+ *
+ * <p>离线玩家也能用：虚拟 CommandSender（名字 = 请求里的玩家名，权限按 offline-permissions 放行）。
  */
-public final class AEMusicBridge extends Plugin {
+public final class AEMobileBridge extends Plugin {
 
     private static final Gson GSON = new Gson();
-    private static final String DEFAULT_SECRET = "aemobile-music";
+    private static final String DEFAULT_SECRET = "aemobile-bridge";
     private static final int DEFAULT_PORT = 44445;
+    private static final int DEFAULT_CAPTURE_MS = 800;
 
     private final Map<String, long[]> rate = new ConcurrentHashMap<String, long[]>();
     private final Set<String> offlinePermissions = new HashSet<String>();
+    private final Set<String> allowedCommands = new HashSet<String>();
     private final List<String> prefixes = new ArrayList<String>();
     private volatile boolean running;
     private ServerSocket serverSocket;
+    private String bind = "127.0.0.1";
     private String secret = DEFAULT_SECRET;
     private int port = DEFAULT_PORT;
-    private String bind = "127.0.0.1";
+    private int defaultCaptureMs = DEFAULT_CAPTURE_MS;
 
     @Override
     public void onEnable() {
         loadConfig();
         startServer();
-        getLogger().info("AEMobileMusicBridge listening on 127.0.0.1:" + port);
+        getLogger().info("AEMobileBridge listening on " + bind + ":" + port
+                + " commands=" + allowedCommands + " prefixes=" + prefixes);
     }
 
     @Override
@@ -91,6 +95,8 @@ public final class AEMusicBridge extends Plugin {
                 defaults.set("bind", "127.0.0.1");
                 defaults.set("port", DEFAULT_PORT);
                 defaults.set("secret", DEFAULT_SECRET);
+                defaults.set("capture-ms", DEFAULT_CAPTURE_MS);
+                defaults.set("allow-commands", Arrays.asList("music"));
                 defaults.set("prefixes", Arrays.asList("[肥猫电台]", "[AllMusic3]"));
                 defaults.set("offline-permissions", Arrays.asList(
                         "allmusic.play", "allmusic.search", "allmusic.vote",
@@ -101,13 +107,19 @@ public final class AEMusicBridge extends Plugin {
             bind = c.getString("bind", "127.0.0.1");
             port = c.getInt("port", DEFAULT_PORT);
             secret = c.getString("secret", DEFAULT_SECRET);
+            defaultCaptureMs = c.getInt("capture-ms", DEFAULT_CAPTURE_MS);
+            allowedCommands.clear();
+            for (String s : c.getStringList("allow-commands")) {
+                if (s != null && !s.trim().isEmpty()) allowedCommands.add(s.trim().toLowerCase(Locale.ROOT));
+            }
+            if (allowedCommands.isEmpty()) allowedCommands.add("music");
             prefixes.clear();
             prefixes.addAll(c.getStringList("prefixes"));
             offlinePermissions.clear();
             offlinePermissions.addAll(c.getStringList("offline-permissions"));
-            getLogger().info("prefixes=" + prefixes + " offlinePermissions=" + offlinePermissions);
         } catch (Throwable t) {
             getLogger().warning("config load failed, using defaults: " + t);
+            allowedCommands.add("music");
         }
     }
 
@@ -120,7 +132,7 @@ public final class AEMusicBridge extends Plugin {
             public void run() {
                 acceptLoop();
             }
-        }, "AEMobileMusicBridge-accept");
+        }, "AEMobileBridge-accept");
         thread.setDaemon(true);
         thread.start();
     }
@@ -131,7 +143,7 @@ public final class AEMusicBridge extends Plugin {
             serverSocket.setReuseAddress(true);
             serverSocket.bind(new InetSocketAddress(bind, port));
         } catch (Throwable t) {
-            getLogger().severe("cannot bind 127.0.0.1:" + port + " — " + t);
+            getLogger().severe("cannot bind " + bind + ":" + port + " — " + t);
             return;
         }
         while (running) {
@@ -142,7 +154,7 @@ public final class AEMusicBridge extends Plugin {
                 if (running) getLogger().warning("accept failed: " + t);
                 break;
             }
-            Thread worker = new Thread(new ClientHandler(socket), "AEMobileMusicBridge-client");
+            Thread worker = new Thread(new ClientHandler(socket), "AEMobileBridge-client");
             worker.setDaemon(true);
             worker.start();
         }
@@ -158,7 +170,7 @@ public final class AEMusicBridge extends Plugin {
         @Override
         public void run() {
             try {
-                socket.setSoTimeout(10000);
+                socket.setSoTimeout(12000);
                 BufferedReader reader = new BufferedReader(
                         new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                 PrintWriter writer = new PrintWriter(
@@ -181,79 +193,64 @@ public final class AEMusicBridge extends Plugin {
     // ------------------------------------------------------------ handle
 
     private JsonObject handle(String line) {
-        JsonObject out = new JsonObject();
         try {
             JsonObject req = new JsonParser().parse(line).getAsJsonObject();
+            String op = str(req, "op").trim().toLowerCase(Locale.ROOT);
+            if (!op.isEmpty() && !"exec".equals(op)) return error("UNKNOWN_OP");
+
             String givenSecret = str(req, "secret");
             if (secret != null && !secret.isEmpty() && !secret.equals(givenSecret)) {
-                return error(out, "BAD_SECRET");
+                return error("BAD_SECRET");
             }
 
             String playerName = str(req, "player").trim();
-            if (!playerName.matches("[A-Za-z0-9_]{1,16}")) {
-                return error(out, "BAD_PLAYER");
-            }
+            if (!playerName.matches("[A-Za-z0-9_]{1,16}")) return error("BAD_PLAYER");
+
             String limited = rateCheck(playerName);
-            if (limited != null) {
-                return error(out, limited);
-            }
+            if (limited != null) return error(limited);
 
-            String cmd = str(req, "cmd").trim().toLowerCase(Locale.ROOT);
-            if (cmd.isEmpty() || !cmd.matches("[a-z0-9]+")) {
-                return error(out, "BAD_COMMAND");
+            String command = str(req, "command").trim();
+            if (command.startsWith("/")) command = command.substring(1);
+            if (command.isEmpty() || command.length() > 512
+                    || command.indexOf('\n') >= 0 || command.indexOf('\r') >= 0) {
+                return error("BAD_COMMAND");
             }
-            List<String> args = new ArrayList<String>();
-            JsonElement argsEl = req.get("args");
-            if (argsEl != null && argsEl.isJsonArray()) {
-                JsonArray arr = argsEl.getAsJsonArray();
-                for (JsonElement e : arr) {
-                    String a = e == null || e.isJsonNull() ? "" : e.getAsString();
-                    a = a.replace('\n', ' ').replace('\r', ' ').trim();
-                    if (a.length() > 80) a = a.substring(0, 80);
-                    args.add(a);
-                }
-            }
-            if (args.size() > 6) {
-                return error(out, "TOO_MANY_ARGS");
-            }
+            String root = command.split("\\s+", 2)[0].toLowerCase(Locale.ROOT);
+            if (!allowedCommands.contains(root)) return error("COMMAND_NOT_ALLOWED:" + root);
 
-            StringBuilder command = new StringBuilder("music ").append(cmd);
-            for (String a : args) {
-                if (a.isEmpty()) continue;
-                command.append(' ').append(a);
-            }
+            int captureMs = req.has("captureMs") ? req.get("captureMs").getAsInt() : defaultCaptureMs;
+            captureMs = Math.max(100, Math.min(10000, captureMs));
 
             ProxiedPlayer online = ProxyServer.getInstance().getPlayer(playerName);
-            CaptureSender sender = new CaptureSender(
-                    online,
-                    playerName,
-                    offlinePermissions);
+            CaptureSender sender = new CaptureSender(online, playerName, offlinePermissions);
             boolean found = ProxyServer.getInstance().getPluginManager()
-                    .dispatchCommand(sender, command.toString());
+                    .dispatchCommand(sender, command);
 
-            // 搜歌是异步的：命令先回“正在排队”，结果晚一点才 sendMessage 给同一个 sender。
-            // 这里留一个窗口把延迟消息也收进来；其它命令 400ms 足够。
             try {
-                Thread.sleep("search".equals(cmd) ? 3500L : 400L);
+                Thread.sleep(captureMs);
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             }
 
-            List<String> lines = cleanLines(sender.lines());
+            JsonObject out = new JsonObject();
             out.addProperty("ok", found);
+            out.addProperty("found", found);
             out.addProperty("online", online != null);
-            if (!found) out.addProperty("error", "COMMAND_NOT_FOUND");
+            if (!found) out.addProperty("error", "UNKNOWN_COMMAND");
             JsonArray arr = new JsonArray();
-            for (String l : lines) arr.add(new JsonPrimitive(l));
+            for (String l : cleanLines(sender.lines())) arr.add(new JsonPrimitive(l));
             out.add("lines", arr);
             return out;
         } catch (Throwable t) {
-            return error(out, "EXCEPTION:" + t);
+            return error("EXCEPTION:" + t);
         }
     }
 
-    private static JsonObject error(JsonObject out, String message) {
+    private static JsonObject error(String message) {
+        JsonObject out = new JsonObject();
         out.addProperty("ok", false);
+        out.addProperty("found", false);
+        out.addProperty("online", false);
         out.addProperty("error", message);
         out.add("lines", new JsonArray());
         return out;
@@ -281,7 +278,7 @@ public final class AEMusicBridge extends Plugin {
         return out;
     }
 
-    /** 单玩家 500ms 一条、每分钟 30 条 */
+    /** 单玩家 1 秒一条、每分钟 30 条 */
     private String rateCheck(String player) {
         long now = System.currentTimeMillis();
         long[] st = rate.get(player);

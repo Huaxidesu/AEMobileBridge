@@ -12,11 +12,14 @@ if (-not $env:JAVA_HOME) {
 if (Test-Path -LiteralPath "build") { Remove-Item -LiteralPath "build" -Recurse -Force }
 New-Item -ItemType Directory -Force build\classes | Out-Null
 
+$ErrorActionPreference = "Continue"
 & "$env:JAVA_HOME\bin\javac.exe" -source 8 -target 8 -encoding UTF-8 -cp $api `
-  -d build\classes src\main\java\dev\youtiao\aemobile\musicbridge\*.java
-if ($LASTEXITCODE -ne 0) { throw "javac failed" }
+  -d build\classes src\main\java\dev\youtiao\aemobile\bridge\*.java 2>&1 | Out-Null
+$code = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($code -ne 0) { throw "javac failed" }
 
-& "$env:JAVA_HOME\bin\jar.exe" cf AEMobileMusicBridge.jar -C build\classes . -C src\main\resources .
+& "$env:JAVA_HOME\bin\jar.exe" cf AEMobileBridge.jar -C build\classes . -C src\main\resources .
 if ($LASTEXITCODE -ne 0) { throw "jar failed" }
 
-Write-Output "built: AEMobileMusicBridge.jar"
+Write-Output "built: AEMobileBridge.jar"
