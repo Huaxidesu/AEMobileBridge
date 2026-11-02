@@ -67,9 +67,13 @@ public final class AEMobileBridge extends Plugin implements Listener {
     private int defaultCaptureMs = DEFAULT_CAPTURE_MS;
 
     private boolean tabEnabled = true;
-    private int tabDelayMs = 500;
+    /** 进服后按这些毫秒数逐次下发，跨过 Forge 的 FML 握手窗口（握手期间自定义负载会被丢掉）。 */
+    private int[] tabDelaysMs = {2500, 5000, 8000, 12000, 18000, 26000};
     private String tabHeader = DEFAULT_TAB_HEADER;
     private String tabFooter = DEFAULT_TAB_FOOTER;
+    /** {@code tab_set} 下发的临时覆盖，只在内存里，BC 重启即失效。 */
+    private volatile String tabHeaderOverride;
+    private volatile String tabFooterOverride;
 
     @Override
     public void onEnable() {
@@ -107,44 +111,70 @@ public final class AEMobileBridge extends Plugin implements Listener {
 
     // ------------------------------------------------------------ tab listener
 
+    /**
+     * 玩家连上子服后按 {@link #tabDelaysMs} 逐次下发。
+     *
+     * <p>为什么不是发一次：{@code ServerConnectedEvent} 触发时客户端还在跑 Forge 的 FML 握手
+     * （本机实测握手在 <em>进服后 1 秒左右</em>完成，整合包越重越慢），握手期间的自定义负载
+     * 会被客户端网络层直接丢掉，模组收不到 {@code ClientCustomPacketEvent}。所以用一个
+     * 递增的延迟阶梯反复下发，落地的那一次就生效；负载只有几百字节，重复下发没有副作用。
+     */
     @EventHandler
     public void onServerConnected(final ServerConnectedEvent event) {
         if (!tabEnabled) return;
         final ProxiedPlayer player = event.getPlayer();
         final String serverName = event.getServer() != null && event.getServer().getInfo() != null
                 ? event.getServer().getInfo().getName() : "";
-        getProxy().getScheduler().schedule(this, new Runnable() {
-            @Override
-            public void run() {
-                if (player.isConnected()) {
-                    sendTabHeaderFooter(player, serverName);
+        for (int i = 0; i < tabDelaysMs.length; i++) {
+            final int attempt = i + 1;
+            final int delay = tabDelaysMs[i];
+            getProxy().getScheduler().schedule(this, new Runnable() {
+                @Override
+                public void run() {
+                    if (!player.isConnected()) return;
+                    // 切服了就别再往旧连接上发
+                    String current = player.getServer() != null && player.getServer().getInfo() != null
+                            ? player.getServer().getInfo().getName() : "";
+                    if (!serverName.isEmpty() && !serverName.equals(current)) return;
+                    sendTabHeaderFooter(player, current, attempt);
                 }
-            }
-        }, tabDelayMs, TimeUnit.MILLISECONDS);
+            }, delay, TimeUnit.MILLISECONDS);
+        }
     }
 
     public void sendTabHeaderFooter(ProxiedPlayer player, String serverName) {
+        sendTabHeaderFooter(player, serverName, 0);
+    }
+
+    private void sendTabHeaderFooter(ProxiedPlayer player, String serverName, int attempt) {
         try {
+            String rawHeader = tabHeaderOverride != null ? tabHeaderOverride : tabHeader;
+            String rawFooter = tabFooterOverride != null ? tabFooterOverride : tabFooter;
             JsonObject json = new JsonObject();
-            if (tabHeader != null && !tabHeader.isEmpty()) {
-                String h = tabHeader
-                        .replace("{PLAYER}", player.getName())
-                        .replace("{SERVER}", serverName)
-                        .replace("{ONLINE}", String.valueOf(getProxy().getOnlineCount()));
-                json.addProperty("header", h);
-            }
-            if (tabFooter != null && !tabFooter.isEmpty()) {
-                String f = tabFooter
-                        .replace("{PLAYER}", player.getName())
-                        .replace("{SERVER}", serverName)
-                        .replace("{ONLINE}", String.valueOf(getProxy().getOnlineCount()));
-                json.addProperty("footer", f);
+            String h = expand(rawHeader, player, serverName);
+            String f = expand(rawFooter, player, serverName);
+            if (!h.isEmpty()) json.addProperty("header", h);
+            if (!f.isEmpty()) json.addProperty("footer", f);
+            if (json.entrySet().isEmpty()) {
+                // 空包会把客户端的 hasServerData 置真、页眉页脚被清空，比不发更糟
+                getLogger().warning("tab header/footer is empty, skipped for " + player.getName());
+                return;
             }
             byte[] bytes = json.toString().getBytes(StandardCharsets.UTF_8);
             player.sendData(TAB_CHANNEL, bytes);
+            getLogger().log(java.util.logging.Level.FINE, "SU|TabHF -> " + player.getName()
+                    + " (attempt " + attempt + ", " + bytes.length + "B)");
         } catch (Throwable t) {
             getLogger().warning("Failed to send " + TAB_CHANNEL + " to " + player.getName() + ": " + t);
         }
+    }
+
+    private static String expand(String text, ProxiedPlayer player, String serverName) {
+        if (text == null) return "";
+        return text
+                .replace("{PLAYER}", player.getName())
+                .replace("{SERVER}", serverName == null ? "" : serverName)
+                .replace("{ONLINE}", String.valueOf(ProxyServer.getInstance().getOnlineCount()));
     }
 
     // ------------------------------------------------------------ config
@@ -169,7 +199,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
                         "allmusic.play", "allmusic.search", "allmusic.vote",
                         "allmusic.list", "allmusic.cancel", "allmusic.mute", "allmusic.push"));
                 defaults.set("tab.enabled", true);
-                defaults.set("tab.delay-ms", 500);
+                defaults.set("tab.delays-ms", Arrays.asList(2500, 5000, 8000, 12000, 18000, 26000));
                 defaults.set("tab.header", DEFAULT_TAB_HEADER);
                 defaults.set("tab.footer", DEFAULT_TAB_FOOTER);
                 provider.save(defaults, file);
@@ -190,13 +220,37 @@ public final class AEMobileBridge extends Plugin implements Listener {
             offlinePermissions.addAll(c.getStringList("offline-permissions"));
 
             tabEnabled = c.getBoolean("tab.enabled", true);
-            tabDelayMs = c.getInt("tab.delay-ms", 500);
+            tabDelaysMs = parseDelays(c.get("tab.delays-ms"));
+            // 老配置里的 tab.delay-ms 还能用：只有一个值时当作唯一一次下发
+            if (c.get("tab.delays-ms") == null && c.get("tab.delay-ms") != null) {
+                tabDelaysMs = new int[]{Math.max(0, c.getInt("tab.delay-ms", 2500))};
+            }
             tabHeader = c.getString("tab.header", DEFAULT_TAB_HEADER);
             tabFooter = c.getString("tab.footer", DEFAULT_TAB_FOOTER);
         } catch (Throwable t) {
             getLogger().warning("config load failed, using defaults: " + t);
             allowedCommands.add("music");
         }
+    }
+
+    private static int[] parseDelays(Object raw) {
+        java.util.List<Integer> out = new ArrayList<Integer>();
+        if (raw instanceof Iterable) {
+            for (Object o : (Iterable<?>) raw) {
+                if (o instanceof Number) out.add(Math.max(0, ((Number) o).intValue()));
+                else if (o != null) {
+                    try {
+                        out.add(Math.max(0, Integer.parseInt(o.toString().trim())));
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+        }
+        if (out.isEmpty()) return new int[]{2500, 5000, 8000, 12000, 18000, 26000};
+        int[] arr = new int[out.size()];
+        for (int i = 0; i < arr.length; i++) arr[i] = out.get(i);
+        Arrays.sort(arr);
+        return arr;
     }
 
     // ------------------------------------------------------------ server
@@ -283,12 +337,66 @@ public final class AEMobileBridge extends Plugin implements Listener {
                 for (ProxiedPlayer p : getProxy().getPlayers()) {
                     String sName = p.getServer() != null && p.getServer().getInfo() != null
                             ? p.getServer().getInfo().getName() : "";
-                    sendTabHeaderFooter(p, sName);
+                    sendTabHeaderFooter(p, sName, 0);
                     count++;
                 }
                 JsonObject out = new JsonObject();
                 out.addProperty("ok", true);
                 out.addProperty("synced", count);
+                return out;
+            }
+
+            if ("tab_status".equals(op)) {
+                JsonObject out = new JsonObject();
+                out.addProperty("ok", true);
+                out.addProperty("enabled", tabEnabled);
+                JsonArray d = new JsonArray();
+                for (int v : tabDelaysMs) d.add(new JsonPrimitive(v));
+                out.add("delays", d);
+                out.addProperty("header", tabHeaderOverride != null ? tabHeaderOverride : tabHeader);
+                out.addProperty("footer", tabFooterOverride != null ? tabFooterOverride : tabFooter);
+                out.addProperty("hasOverride", tabHeaderOverride != null || tabFooterOverride != null);
+                return out;
+            }
+
+            if ("tab_set".equals(op)) {
+                // 内存覆盖，用来在不重启 BC 的前提下试文案；传空串表示清除覆盖
+                if (req.has("header")) {
+                    String h = str(req, "header");
+                    tabHeaderOverride = h.isEmpty() ? null : h;
+                }
+                if (req.has("footer")) {
+                    String f = str(req, "footer");
+                    tabFooterOverride = f.isEmpty() ? null : f;
+                }
+                int count = 0;
+                for (ProxiedPlayer p : getProxy().getPlayers()) {
+                    String sName = p.getServer() != null && p.getServer().getInfo() != null
+                            ? p.getServer().getInfo().getName() : "";
+                    sendTabHeaderFooter(p, sName, 0);
+                    count++;
+                }
+                JsonObject out = new JsonObject();
+                out.addProperty("ok", true);
+                out.addProperty("synced", count);
+                out.addProperty("hasOverride", tabHeaderOverride != null || tabFooterOverride != null);
+                return out;
+            }
+
+            if ("tab_probe".equals(op)) {
+                // 故意发一段坏 JSON：客户端 ServerUtilities 解析失败会打
+                // "Failed to parse SU|TabHF packet" 警告 —— 客户端日志里出现这条，
+                // 就说明信道是通的，问题在文案/渲染而不是投递。
+                byte[] bad = ("{\"probe\":\"aemobile\"," + System.currentTimeMillis()).getBytes(StandardCharsets.UTF_8);
+                int count = 0;
+                for (ProxiedPlayer p : getProxy().getPlayers()) {
+                    p.sendData(TAB_CHANNEL, bad);
+                    count++;
+                }
+                JsonObject out = new JsonObject();
+                out.addProperty("ok", true);
+                out.addProperty("probed", count);
+                out.addProperty("payload", new String(bad, StandardCharsets.UTF_8));
                 return out;
             }
 
