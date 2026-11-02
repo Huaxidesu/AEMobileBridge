@@ -66,7 +66,7 @@ TCP 一行一个 JSON：
 
 | op | 作用 | 返回 |
 |---|---|---|
-| `tab_source` | **后端上报**：AEMobile 把本服 `serverutilities.cfg` 的 `tab.headerText/footerText` 发上来，按 `server`（BC 子服名，空串=全局）缓存并立即重发；不带 `header`/`footer` 表示清除该缓存 | `{"ok":true,"server":"tks","synced":N}` |
+| `tab_source` | **后端上报**：AEMobile 把本服 `serverutilities.cfg` 的 `tab.headerText/footerText` 发上来，带 `port`（本服 `server.properties` 端口）由代理反查子服名，也可直接传 `server` 指定；不带 `header`/`footer` 表示清除该缓存 | `{"ok":true,"server":"mgl","synced":N}` |
 | `tab_sync` | 立刻给所有在线玩家重发一次页眉页脚 | `{"ok":true,"synced":N}` |
 | `tab_status` | 查看开关、下发档位、当前生效的文案，以及各子服上报的原文 | `{"ok":true,"enabled":true,"delays":[...],"header":"...","footer":"...","hasOverride":false,"serverSources":{...}}` |
 | `tab_set` | 临时覆盖文案，可传 `header` / `footer`；**只在内存里**，BC 重启失效，传空串表示清除 | `{"ok":true,"synced":N,"hasOverride":true}` |
@@ -78,6 +78,9 @@ TCP 一行一个 JSON：
 
 - AEMobile 3.5.1+ 在玩家登录时反射读本服 `ServerUtilitiesConfig.tab.headerText/footerText`，
   通过 `tab_source` 上报给代理；内容没变不重复发。代理按子服缓存，玩家进服时下发。
+- **不用在每台后端填子服名**（3.5.2+）：后端上报自己 `server.properties` 的 `server-port`，
+  代理在 `servers:` 里按端口反查（如 25588 → `mgl`），命中时日志打
+  `tab_source: port 25588 -> backend 'mgl'`。端口对不上才退回手填的 `server`，再不行对所有子服生效。
 - 生效优先级：`tab_set` 运行时覆盖 → 子服上报值 → `config.yml` 的 `tab.header/footer` → 内置中性文案。
 - 内置默认值刻意保持中性（只有 `{ONLINE}` / `{SERVER}`），仓库和 release 里不写具体服务器的
   群号或口号；要改文案请改 SU 配置，改完下一次有人登录就会上报（或手动发一次 `tab_source`）。
