@@ -35,8 +35,11 @@ tab:
   enabled: true
   # 玩家进子服后按这些毫秒数逐次下发；FML 握手完成前的自定义负载会被客户端丢掉，所以要重发
   delays-ms: [2500, 5000, 8000, 12000, 18000, 26000]
-  header: "&6✦ &8&m---&r &7页眉 &8&m---&r &6✦"    # 支持 \n 换行、& 颜色码
-  footer: "&7在线: &a{ONLINE} &8│ &7本服: &b{SERVER}"
+  # 优先用子服 ServerUtilities 上报的 tab.headerText/footerText（AEMobile 3.5.1+ 会自动上报）
+  prefer-server-config: true
+  # 下面两项只是兜底/覆盖，内置默认值是中性的；真正的文案放在 SU 配置里
+  header: "&b&l{ONLINE} &7位冒险者在线"    # 支持 \n 换行、& 颜色码
+  footer: "&7本服: &b{SERVER}"
 ```
 
 ## 协议
@@ -63,13 +66,21 @@ TCP 一行一个 JSON：
 
 | op | 作用 | 返回 |
 |---|---|---|
+| `tab_source` | **后端上报**：AEMobile 把本服 `serverutilities.cfg` 的 `tab.headerText/footerText` 发上来，按 `server`（BC 子服名，空串=全局）缓存并立即重发；不带 `header`/`footer` 表示清除该缓存 | `{"ok":true,"server":"tks","synced":N}` |
 | `tab_sync` | 立刻给所有在线玩家重发一次页眉页脚 | `{"ok":true,"synced":N}` |
-| `tab_status` | 查看开关、下发档位、当前生效的文案 | `{"ok":true,"enabled":true,"delays":[...],"header":"...","footer":"...","hasOverride":false}` |
+| `tab_status` | 查看开关、下发档位、当前生效的文案，以及各子服上报的原文 | `{"ok":true,"enabled":true,"delays":[...],"header":"...","footer":"...","hasOverride":false,"serverSources":{...}}` |
 | `tab_set` | 临时覆盖文案，可传 `header` / `footer`；**只在内存里**，BC 重启失效，传空串表示清除 | `{"ok":true,"synced":N,"hasOverride":true}` |
 | `tab_probe` | 故意发一段坏 JSON，客户端会打印 `Failed to parse SU|TabHF packet`，用来确认信道通不通 | `{"ok":true,"probed":N,"payload":"..."}` |
 
 ## TAB 样式下发
 
+**文案只有一个来源：子服 ServerUtilities 的 `tab.headerText` / `tab.footerText`。**
+
+- AEMobile 3.5.1+ 在玩家登录时反射读本服 `ServerUtilitiesConfig.tab.headerText/footerText`，
+  通过 `tab_source` 上报给代理；内容没变不重复发。代理按子服缓存，玩家进服时下发。
+- 生效优先级：`tab_set` 运行时覆盖 → 子服上报值 → `config.yml` 的 `tab.header/footer` → 内置中性文案。
+- 内置默认值刻意保持中性（只有 `{ONLINE}` / `{SERVER}`），仓库和 release 里不写具体服务器的
+  群号或口号；要改文案请改 SU 配置，改完下一次有人登录就会上报（或手动发一次 `tab_source`）。
 - 插件注册 `SU|TabHF` 信道，向 ServerUtilities 发 `{"header":"...","footer":"..."}`（UTF-8 JSON，
   `\n` 换行、`&` 颜色码由客户端转 `§`），文案里的 `{PLAYER}` / `{SERVER}` / `{ONLINE}` 会替换成当前值。
 - `ServerConnectedEvent` 触发时客户端还在跑 FML 握手，握手期间的自定义负载会被丢掉，

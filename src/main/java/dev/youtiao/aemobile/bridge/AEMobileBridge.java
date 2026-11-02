@@ -47,6 +47,12 @@ import java.util.concurrent.TimeUnit;
 public final class AEMobileBridge extends Plugin implements Listener {
 
     public static final String TAB_CHANNEL = "SU|TabHF";
+
+    /**
+     * 兜底文案，**刻意保持中性**：真正的内容由子服 ServerUtilities 的
+     * {@code tab.headerText} / {@code tab.footerText} 上报（op {@code tab_source}），
+     * 或由本插件的 {@code config.yml} 覆盖。仓库与 release 里不放具体服务器的群号/口号。
+     */
     private static final String DEFAULT_TAB_HEADER = "&b&l{ONLINE} &7位冒险者在线";
     private static final String DEFAULT_TAB_FOOTER = "&7本服: &b{SERVER}";
 
@@ -74,6 +80,14 @@ public final class AEMobileBridge extends Plugin implements Listener {
     /** {@code tab_set} 下发的临时覆盖，只在内存里，BC 重启即失效。 */
     private volatile String tabHeaderOverride;
     private volatile String tabFooterOverride;
+    /** 是否优先用子服 ServerUtilities 上报的文案（op {@code tab_source}）。 */
+    private boolean tabPreferServerConfig = true;
+    /**
+     * 子服上报的 SU 文案：key 是 BC 里的子服名（{@code /server} 用的那个），
+     * {@code ""} 表示没有填 server-name 的后端，当作全局兜底。
+     * value[0]=header，value[1]=footer，单独为 null 表示该侧没配。
+     */
+    private final Map<String, String[]> suTabByServer = new ConcurrentHashMap<String, String[]>();
 
     @Override
     public void onEnable() {
@@ -148,18 +162,23 @@ public final class AEMobileBridge extends Plugin implements Listener {
 
     private void sendTabHeaderFooter(ProxiedPlayer player, String serverName, int attempt) {
         try {
-            String rawHeader = tabHeaderOverride != null ? tabHeaderOverride : tabHeader;
-            String rawFooter = tabFooterOverride != null ? tabFooterOverride : tabFooter;
+            // 优先级：tab_set 运行时覆盖 > 子服 SU 上报 > config.yml > 内置兜底
+            String[] su = tabPreferServerConfig ? pickServerTab(serverName) : null;
+            String rawHeader = tabHeaderOverride != null ? tabHeaderOverride
+                    : (su != null && su[0] != null ? su[0] : tabHeader);
+            String rawFooter = tabFooterOverride != null ? tabFooterOverride
+                    : (su != null && su[1] != null ? su[1] : tabFooter);
             JsonObject json = new JsonObject();
             String h = expand(rawHeader, player, serverName);
             String f = expand(rawFooter, player, serverName);
-            if (!h.isEmpty()) json.addProperty("header", h);
-            if (!f.isEmpty()) json.addProperty("footer", f);
-            if (json.entrySet().isEmpty()) {
-                // 空包会把客户端的 hasServerData 置真、页眉页脚被清空，比不发更糟
+            if (h.isEmpty() && f.isEmpty()) {
+                // 两边都空时整包不发：客户端收到 {} 会把 hasServerData 置真、页眉页脚被清空
                 getLogger().warning("tab header/footer is empty, skipped for " + player.getName());
                 return;
             }
+            // 两侧都写进 JSON（空串也算明确表达）：只写一边时客户端会把另一边解析成 null 并清空
+            json.addProperty("header", h);
+            json.addProperty("footer", f);
             byte[] bytes = json.toString().getBytes(StandardCharsets.UTF_8);
             player.sendData(TAB_CHANNEL, bytes);
             getLogger().log(java.util.logging.Level.FINE, "SU|TabHF -> " + player.getName()
@@ -167,6 +186,17 @@ public final class AEMobileBridge extends Plugin implements Listener {
         } catch (Throwable t) {
             getLogger().warning("Failed to send " + TAB_CHANNEL + " to " + player.getName() + ": " + t);
         }
+    }
+
+    /**
+     * 取该子服上报的 SU 文案：先按子服名精确匹配，再退到 {@code ""}（没填 server-name 的后端）。
+     *
+     * @return null 表示没有任何上报
+     */
+    private String[] pickServerTab(String serverName) {
+        String[] exact = suTabByServer.get(serverName == null ? "" : serverName);
+        if (exact != null) return exact;
+        return suTabByServer.get("");
     }
 
     private static String expand(String text, ProxiedPlayer player, String serverName) {
@@ -200,6 +230,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
                         "allmusic.list", "allmusic.cancel", "allmusic.mute", "allmusic.push"));
                 defaults.set("tab.enabled", true);
                 defaults.set("tab.delays-ms", Arrays.asList(2500, 5000, 8000, 12000, 18000, 26000));
+                defaults.set("tab.prefer-server-config", true);
                 defaults.set("tab.header", DEFAULT_TAB_HEADER);
                 defaults.set("tab.footer", DEFAULT_TAB_FOOTER);
                 provider.save(defaults, file);
@@ -225,6 +256,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
             if (c.get("tab.delays-ms") == null && c.get("tab.delay-ms") != null) {
                 tabDelaysMs = new int[]{Math.max(0, c.getInt("tab.delay-ms", 2500))};
             }
+            tabPreferServerConfig = c.getBoolean("tab.prefer-server-config", true);
             tabHeader = c.getString("tab.header", DEFAULT_TAB_HEADER);
             tabFooter = c.getString("tab.footer", DEFAULT_TAB_FOOTER);
         } catch (Throwable t) {
@@ -346,6 +378,39 @@ public final class AEMobileBridge extends Plugin implements Listener {
                 return out;
             }
 
+            if ("tab_source".equals(op)) {
+                // 后端 mod（AEMobile）读 ServerUtilities 的 tab.headerText/footerText 后上报，
+                // 代理按子服缓存；这样文案的唯一来源就是服务端的 SU 配置，插件里不再写死。
+                String server = str(req, "server").trim();
+                boolean hasH = req.has("header");
+                boolean hasF = req.has("footer");
+                String h = hasH ? str(req, "header") : null;
+                String f = hasF ? str(req, "footer") : null;
+                if (!hasH && !hasF) {
+                    suTabByServer.remove(server);
+                } else {
+                    // 空串等价于「这一侧没配」，回退到 config.yml，而不是把客户端清空
+                    suTabByServer.put(server, new String[]{
+                            h == null || h.isEmpty() ? null : h,
+                            f == null || f.isEmpty() ? null : f});
+                }
+                int count = 0;
+                for (ProxiedPlayer p : getProxy().getPlayers()) {
+                    String sName = p.getServer() != null && p.getServer().getInfo() != null
+                            ? p.getServer().getInfo().getName() : "";
+                    if (!server.isEmpty() && !server.equals(sName)) continue;
+                    sendTabHeaderFooter(p, sName, 0);
+                    count++;
+                }
+                JsonObject out = new JsonObject();
+                out.addProperty("ok", true);
+                out.addProperty("server", server);
+                out.addProperty("synced", count);
+                out.addProperty("header", h == null ? "" : h);
+                out.addProperty("footer", f == null ? "" : f);
+                return out;
+            }
+
             if ("tab_status".equals(op)) {
                 JsonObject out = new JsonObject();
                 out.addProperty("ok", true);
@@ -353,9 +418,21 @@ public final class AEMobileBridge extends Plugin implements Listener {
                 JsonArray d = new JsonArray();
                 for (int v : tabDelaysMs) d.add(new JsonPrimitive(v));
                 out.add("delays", d);
-                out.addProperty("header", tabHeaderOverride != null ? tabHeaderOverride : tabHeader);
-                out.addProperty("footer", tabFooterOverride != null ? tabFooterOverride : tabFooter);
+                out.addProperty("preferServerConfig", tabPreferServerConfig);
+                String[] def = tabPreferServerConfig ? pickServerTab("") : null;
+                out.addProperty("header", tabHeaderOverride != null ? tabHeaderOverride
+                        : (def != null && def[0] != null ? def[0] : tabHeader));
+                out.addProperty("footer", tabFooterOverride != null ? tabFooterOverride
+                        : (def != null && def[1] != null ? def[1] : tabFooter));
                 out.addProperty("hasOverride", tabHeaderOverride != null || tabFooterOverride != null);
+                JsonObject sources = new JsonObject();
+                for (Map.Entry<String, String[]> e : suTabByServer.entrySet()) {
+                    JsonObject one = new JsonObject();
+                    one.addProperty("header", e.getValue()[0] == null ? "" : e.getValue()[0]);
+                    one.addProperty("footer", e.getValue()[1] == null ? "" : e.getValue()[1]);
+                    sources.add(e.getKey().isEmpty() ? "(default)" : e.getKey(), one);
+                }
+                out.add("serverSources", sources);
                 return out;
             }
 
