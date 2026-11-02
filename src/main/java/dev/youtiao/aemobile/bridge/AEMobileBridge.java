@@ -50,7 +50,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
     public static final String TAB_CHANNEL = "SU|TabHF";
 
     /**
-     * 兜底文案，**刻意保持中性**：真正的内容由子服 ServerUtilities 的
+     * 缺省文案，**刻意保持中性**：真正的内容由子服 ServerUtilities 的
      * {@code tab.headerText} / {@code tab.footerText} 上报（op {@code tab_source}），
      * 或由本插件的 {@code config.yml} 覆盖。仓库与 release 里不放具体服务器的群号/口号。
      */
@@ -85,7 +85,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
     private boolean tabPreferServerConfig = true;
     /**
      * 子服上报的 SU 文案：key 是 BC 里的子服名（{@code /server} 用的那个），
-     * {@code ""} 表示没有填 server-name 的后端，当作全局兜底。
+     * {@code ""} 表示没有填 server-name 的后端，视为全局缺省。
      * value[0]=header，value[1]=footer，单独为 null 表示该侧没配。
      */
     private final Map<String, String[]> suTabByServer = new ConcurrentHashMap<String, String[]>();
@@ -129,10 +129,10 @@ public final class AEMobileBridge extends Plugin implements Listener {
     /**
      * 玩家连上子服后按 {@link #tabDelaysMs} 逐次下发。
      *
-     * <p>为什么不是发一次：{@code ServerConnectedEvent} 触发时客户端还在跑 Forge 的 FML 握手
+     * <p>多次下发的原因：{@code ServerConnectedEvent} 触发时客户端还在跑 Forge 的 FML 握手
      * （本机实测握手在 <em>进服后 1 秒左右</em>完成，整合包越重越慢），握手期间的自定义负载
-     * 会被客户端网络层直接丢掉，模组收不到 {@code ClientCustomPacketEvent}。所以用一个
-     * 递增的延迟阶梯反复下发，落地的那一次就生效；负载只有几百字节，重复下发没有副作用。
+     * 会被客户端网络层直接丢弃，模组收不到 {@code ClientCustomPacketEvent}。因此采用一个
+     * 递增的延迟阶梯反复下发，实际送达的那一次生效；负载只有几百字节，重复下发没有副作用。
      */
     @EventHandler
     public void onServerConnected(final ServerConnectedEvent event) {
@@ -147,7 +147,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
                 @Override
                 public void run() {
                     if (!player.isConnected()) return;
-                    // 切服了就别再往旧连接上发
+                    // 切服后不再向旧连接发送
                     String current = player.getServer() != null && player.getServer().getInfo() != null
                             ? player.getServer().getInfo().getName() : "";
                     if (!serverName.isEmpty() && !serverName.equals(current)) return;
@@ -163,7 +163,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
 
     private void sendTabHeaderFooter(ProxiedPlayer player, String serverName, int attempt) {
         try {
-            // 优先级：tab_set 运行时覆盖 > 子服 SU 上报 > config.yml > 内置兜底
+            // 优先级：tab_set 运行时覆盖 > 子服 SU 上报 > config.yml > 内置缺省
             String[] su = tabPreferServerConfig ? pickServerTab(serverName) : null;
             String rawHeader = tabHeaderOverride != null ? tabHeaderOverride
                     : (su != null && su[0] != null ? su[0] : tabHeader);
@@ -274,7 +274,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
 
             tabEnabled = c.getBoolean("tab.enabled", true);
             tabDelaysMs = parseDelays(c.get("tab.delays-ms"));
-            // 老配置里的 tab.delay-ms 还能用：只有一个值时当作唯一一次下发
+            // 旧配置键 tab.delay-ms 保持兼容：只有一个值时视为唯一一次下发
             if (c.get("tab.delays-ms") == null && c.get("tab.delay-ms") != null) {
                 tabDelaysMs = new int[]{Math.max(0, c.getInt("tab.delay-ms", 2500))};
             }
@@ -402,7 +402,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
 
             if ("tab_source".equals(op)) {
                 // 后端 mod（AEMobile）读 ServerUtilities 的 tab.headerText/footerText 后上报，
-                // 代理按子服缓存；这样文案的唯一来源就是服务端的 SU 配置，插件里不再写死。
+                // 代理按子服缓存；这样文案的唯一来源就是服务端的 SU 配置，插件内不再硬编码。
                 String server = str(req, "server").trim();
                 // 后端不用手填子服名：它上报自己的 server-port，这里按端口反查 BC 里的名字。
                 // 手填（或端口对不上）时才用上报值，仍然为空就落到通配 key，对所有子服生效。
@@ -469,7 +469,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
             }
 
             if ("tab_set".equals(op)) {
-                // 内存覆盖，用来在不重启 BC 的前提下试文案；传空串表示清除覆盖
+                // 内存覆盖，用于在不重启 BC 的前提下验证文案；传空串表示清除覆盖
                 if (req.has("header")) {
                     String h = str(req, "header");
                     tabHeaderOverride = h.isEmpty() ? null : h;
@@ -493,9 +493,9 @@ public final class AEMobileBridge extends Plugin implements Listener {
             }
 
             if ("tab_probe".equals(op)) {
-                // 故意发一段坏 JSON：客户端 ServerUtilities 解析失败会打
+                // 故意发一段坏 JSON：客户端 ServerUtilities 解析失败会输出
                 // "Failed to parse SU|TabHF packet" 警告 —— 客户端日志里出现这条，
-                // 就说明信道是通的，问题在文案/渲染而不是投递。
+                // 即说明信道连通，问题在文案或渲染而非投递。
                 byte[] bad = ("{\"probe\":\"aemobile\"," + System.currentTimeMillis()).getBytes(StandardCharsets.UTF_8);
                 int count = 0;
                 for (ProxiedPlayer p : getProxy().getPlayers()) {

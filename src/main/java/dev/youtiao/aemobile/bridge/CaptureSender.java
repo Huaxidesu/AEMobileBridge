@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 捕获命令返回给玩家/控制台的聊天，不真的发出去。
+ * 捕获命令返回给玩家/控制台的聊天，不实际发送。
  *
  * <p>在线玩家：权限、分组委托给真实的 ProxiedPlayer，但 sendMessage 只记录。
  * 离线玩家：用一个虚拟 sender（名字 = 请求里的玩家名），权限按 config 的 offline-permissions 放行。
