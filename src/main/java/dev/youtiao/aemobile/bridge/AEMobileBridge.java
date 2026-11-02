@@ -7,6 +7,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 import net.md_5.bungee.api.ProxyServer;
+import net.md_5.bungee.api.config.ServerInfo;
 import net.md_5.bungee.api.connection.ProxiedPlayer;
 import net.md_5.bungee.api.event.ServerConnectedEvent;
 import net.md_5.bungee.api.plugin.Listener;
@@ -199,6 +200,27 @@ public final class AEMobileBridge extends Plugin implements Listener {
         return suTabByServer.get("");
     }
 
+    /**
+     * 按端口反查 BC 子服名。用于 {@code tab_source}：后端只需要报告自己监听哪个端口，
+     * 代理在 {@code servers:} 里找到同端口的条目就知道是谁，不必在每台后端手填子服名。
+     *
+     * @return 子服名；找不到返回空串（调用方会退回通配 key）
+     */
+    private String serverNameOfPort(int port) {
+        try {
+            for (ServerInfo info : getProxy().getServers().values()) {
+                // getAddress() 在旧版 BC（本机 HexaCord v148）和新版里都在，新版只是标了 @Deprecated
+                InetSocketAddress address = info.getAddress();
+                if (address != null && address.getPort() == port) {
+                    return info.getName();
+                }
+            }
+        } catch (Throwable t) {
+            getLogger().warning("tab_source: 按端口 " + port + " 反查子服名失败：" + t);
+        }
+        return "";
+    }
+
     private static String expand(String text, ProxiedPlayer player, String serverName) {
         if (text == null) return "";
         return text
@@ -382,6 +404,16 @@ public final class AEMobileBridge extends Plugin implements Listener {
                 // 后端 mod（AEMobile）读 ServerUtilities 的 tab.headerText/footerText 后上报，
                 // 代理按子服缓存；这样文案的唯一来源就是服务端的 SU 配置，插件里不再写死。
                 String server = str(req, "server").trim();
+                // 后端不用手填子服名：它上报自己的 server-port，这里按端口反查 BC 里的名字。
+                // 手填（或端口对不上）时才用上报值，仍然为空就落到通配 key，对所有子服生效。
+                int sourcePort = req.has("port") ? req.get("port").getAsInt() : 0;
+                if (server.isEmpty() && sourcePort > 0) {
+                    String resolved = serverNameOfPort(sourcePort);
+                    if (!resolved.isEmpty()) {
+                        server = resolved;
+                        getLogger().info("tab_source: port " + sourcePort + " -> backend '" + resolved + "'");
+                    }
+                }
                 boolean hasH = req.has("header");
                 boolean hasF = req.has("footer");
                 String h = hasH ? str(req, "header") : null;
