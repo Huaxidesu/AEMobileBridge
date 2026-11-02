@@ -8,10 +8,13 @@ import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 import net.md_5.bungee.api.ProxyServer;
 import net.md_5.bungee.api.connection.ProxiedPlayer;
+import net.md_5.bungee.api.event.ServerConnectedEvent;
+import net.md_5.bungee.api.plugin.Listener;
 import net.md_5.bungee.api.plugin.Plugin;
 import net.md_5.bungee.config.Configuration;
 import net.md_5.bungee.config.ConfigurationProvider;
 import net.md_5.bungee.config.YamlConfiguration;
+import net.md_5.bungee.event.EventHandler;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -30,20 +33,22 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
- * AEMobileBridge：代理侧通用命令桥。
+ * AEMobileBridge：代理侧通用命令桥与 TAB 样式下发。
  *
  * <p>后端 mod 通过 127.0.0.1 的 JSON TCP 把「以某个玩家身份执行一条代理命令」的请求发过来，
  * 本插件用捕获型 CommandSender 执行，把命令返回的聊天原样回给 App —— 不发到公屏。
  *
- * <p>目前只开了 {@code music} 这个命令根（AllMusic 的 /music）；以后要点歌以外的功能，
- * 把新的命令根加到 config 的 {@code allow-commands} 即可，协议不用改。
- * 搜歌这类异步命令可以用 {@code captureMs} 指定收集窗口（默认 800ms，搜歌由 mod 传 3500ms）。
- *
- * <p>离线玩家也能用：虚拟 CommandSender（名字 = 请求里的玩家名，权限按 offline-permissions 放行）。
+ * <p>同时注册 ServerUtilities 的 {@code SU|TabHF} 信道，玩家进入子服时自动通过 BC 代理下发
+ * 定制的对称 GTNH 风格 TAB Header/Footer，客户端无需修改配置、无需重启即可实时生效。
  */
-public final class AEMobileBridge extends Plugin {
+public final class AEMobileBridge extends Plugin implements Listener {
+
+    public static final String TAB_CHANNEL = "SU|TabHF";
+    private static final String DEFAULT_TAB_HEADER = "&b&l{ONLINE} &7位冒险者在线";
+    private static final String DEFAULT_TAB_FOOTER = "&7本服: &b{SERVER}";
 
     private static final Gson GSON = new Gson();
     private static final String DEFAULT_SECRET = "aemobile-bridge";
@@ -61,22 +66,84 @@ public final class AEMobileBridge extends Plugin {
     private int port = DEFAULT_PORT;
     private int defaultCaptureMs = DEFAULT_CAPTURE_MS;
 
+    private boolean tabEnabled = true;
+    private int tabDelayMs = 500;
+    private String tabHeader = DEFAULT_TAB_HEADER;
+    private String tabFooter = DEFAULT_TAB_FOOTER;
+
     @Override
     public void onEnable() {
         loadConfig();
         startServer();
+        if (tabEnabled) {
+            getProxy().registerChannel(TAB_CHANNEL);
+        }
+        getProxy().getPluginManager().registerListener(this, this);
         getLogger().info("AEMobileBridge listening on " + bind + ":" + port
-                + " commands=" + allowedCommands + " prefixes=" + prefixes);
+                + " commands=" + allowedCommands + " prefixes=" + prefixes
+                + " tabEnabled=" + tabEnabled);
     }
 
     @Override
     public void onDisable() {
         running = false;
+        if (tabEnabled) {
+            try {
+                getProxy().unregisterChannel(TAB_CHANNEL);
+            } catch (Throwable ignored) {
+            }
+        }
+        try {
+            getProxy().getPluginManager().unregisterListener(this);
+        } catch (Throwable ignored) {
+        }
         if (serverSocket != null) {
             try {
                 serverSocket.close();
             } catch (Exception ignored) {
             }
+        }
+    }
+
+    // ------------------------------------------------------------ tab listener
+
+    @EventHandler
+    public void onServerConnected(final ServerConnectedEvent event) {
+        if (!tabEnabled) return;
+        final ProxiedPlayer player = event.getPlayer();
+        final String serverName = event.getServer() != null && event.getServer().getInfo() != null
+                ? event.getServer().getInfo().getName() : "";
+        getProxy().getScheduler().schedule(this, new Runnable() {
+            @Override
+            public void run() {
+                if (player.isConnected()) {
+                    sendTabHeaderFooter(player, serverName);
+                }
+            }
+        }, tabDelayMs, TimeUnit.MILLISECONDS);
+    }
+
+    public void sendTabHeaderFooter(ProxiedPlayer player, String serverName) {
+        try {
+            JsonObject json = new JsonObject();
+            if (tabHeader != null && !tabHeader.isEmpty()) {
+                String h = tabHeader
+                        .replace("{PLAYER}", player.getName())
+                        .replace("{SERVER}", serverName)
+                        .replace("{ONLINE}", String.valueOf(getProxy().getOnlineCount()));
+                json.addProperty("header", h);
+            }
+            if (tabFooter != null && !tabFooter.isEmpty()) {
+                String f = tabFooter
+                        .replace("{PLAYER}", player.getName())
+                        .replace("{SERVER}", serverName)
+                        .replace("{ONLINE}", String.valueOf(getProxy().getOnlineCount()));
+                json.addProperty("footer", f);
+            }
+            byte[] bytes = json.toString().getBytes(StandardCharsets.UTF_8);
+            player.sendData(TAB_CHANNEL, bytes);
+        } catch (Throwable t) {
+            getLogger().warning("Failed to send " + TAB_CHANNEL + " to " + player.getName() + ": " + t);
         }
     }
 
@@ -101,6 +168,10 @@ public final class AEMobileBridge extends Plugin {
                 defaults.set("offline-permissions", Arrays.asList(
                         "allmusic.play", "allmusic.search", "allmusic.vote",
                         "allmusic.list", "allmusic.cancel", "allmusic.mute", "allmusic.push"));
+                defaults.set("tab.enabled", true);
+                defaults.set("tab.delay-ms", 500);
+                defaults.set("tab.header", DEFAULT_TAB_HEADER);
+                defaults.set("tab.footer", DEFAULT_TAB_FOOTER);
                 provider.save(defaults, file);
             }
             Configuration c = provider.load(file);
@@ -117,6 +188,11 @@ public final class AEMobileBridge extends Plugin {
             prefixes.addAll(c.getStringList("prefixes"));
             offlinePermissions.clear();
             offlinePermissions.addAll(c.getStringList("offline-permissions"));
+
+            tabEnabled = c.getBoolean("tab.enabled", true);
+            tabDelayMs = c.getInt("tab.delay-ms", 500);
+            tabHeader = c.getString("tab.header", DEFAULT_TAB_HEADER);
+            tabFooter = c.getString("tab.footer", DEFAULT_TAB_FOOTER);
         } catch (Throwable t) {
             getLogger().warning("config load failed, using defaults: " + t);
             allowedCommands.add("music");
@@ -196,12 +272,27 @@ public final class AEMobileBridge extends Plugin {
         try {
             JsonObject req = new JsonParser().parse(line).getAsJsonObject();
             String op = str(req, "op").trim().toLowerCase(Locale.ROOT);
-            if (!op.isEmpty() && !"exec".equals(op)) return error("UNKNOWN_OP");
 
             String givenSecret = str(req, "secret");
             if (secret != null && !secret.isEmpty() && !secret.equals(givenSecret)) {
                 return error("BAD_SECRET");
             }
+
+            if ("tab_sync".equals(op)) {
+                int count = 0;
+                for (ProxiedPlayer p : getProxy().getPlayers()) {
+                    String sName = p.getServer() != null && p.getServer().getInfo() != null
+                            ? p.getServer().getInfo().getName() : "";
+                    sendTabHeaderFooter(p, sName);
+                    count++;
+                }
+                JsonObject out = new JsonObject();
+                out.addProperty("ok", true);
+                out.addProperty("synced", count);
+                return out;
+            }
+
+            if (!op.isEmpty() && !"exec".equals(op)) return error("UNKNOWN_OP");
 
             String playerName = str(req, "player").trim();
             if (!playerName.matches("[A-Za-z0-9_]{1,16}")) return error("BAD_PLAYER");
