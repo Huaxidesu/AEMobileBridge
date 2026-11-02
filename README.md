@@ -2,7 +2,7 @@
 
 代理侧**通用命令桥**：后端 mod 把「以某个玩家身份执行一条代理命令」的请求发过来，本插件执行并把命令返回的聊天**只回给 App**，不发公屏。
 
-目前 App 用它做 AllMusic 点歌（`/music`），但协议不绑定 music：以后要加别的代理命令（比如其它聊天/活动插件），把命令根加到 `allow-commands` 即可。
+目前 App 用它做 AllMusic 点歌（`/music`），但协议不绑定 music：以后要加其他代理命令（比如其它聊天/活动插件），把命令根加到 `allow-commands` 即可。
 
 另外它也负责给 1.7.10 客户端下发 ServerUtilities 的现代 TAB 页眉页脚（`SU|TabHF` 信道），
 玩家进子服时自动重发，客户端无需改配置。详见下文「TAB 样式下发」。
@@ -33,11 +33,11 @@ offline-permissions:
   - allmusic.push
 tab:
   enabled: true
-  # 玩家进子服后按这些毫秒数逐次下发；FML 握手完成前的自定义负载会被客户端丢掉，所以要重发
+  # 玩家进子服后按这些毫秒数逐次下发；FML 握手完成前的自定义负载会被客户端丢弃，因此需要重发
   delays-ms: [2500, 5000, 8000, 12000, 18000, 26000]
   # 优先用子服 ServerUtilities 上报的 tab.headerText/footerText（AEMobile 3.5.1+ 会自动上报）
   prefer-server-config: true
-  # 下面两项只是兜底/覆盖，内置默认值是中性的；真正的文案放在 SU 配置里
+  # 下面两项只是缺省/覆盖，内置默认值是中性的；真正的文案放在 SU 配置里
   header: "&b&l{ONLINE} &7位冒险者在线"    # 支持 \n 换行、& 颜色码
   footer: "&7本服: &b{SERVER}"
 ```
@@ -70,7 +70,7 @@ TCP 一行一个 JSON：
 | `tab_sync` | 立刻给所有在线玩家重发一次页眉页脚 | `{"ok":true,"synced":N}` |
 | `tab_status` | 查看开关、下发档位、当前生效的文案，以及各子服上报的原文 | `{"ok":true,"enabled":true,"delays":[...],"header":"...","footer":"...","hasOverride":false,"serverSources":{...}}` |
 | `tab_set` | 临时覆盖文案，可传 `header` / `footer`；**只在内存里**，BC 重启失效，传空串表示清除 | `{"ok":true,"synced":N,"hasOverride":true}` |
-| `tab_probe` | 故意发一段坏 JSON，客户端会打印 `Failed to parse SU|TabHF packet`，用来确认信道通不通 | `{"ok":true,"probed":N,"payload":"..."}` |
+| `tab_probe` | 故意发一段坏 JSON，客户端会打印 `Failed to parse SU|TabHF packet`，用来确认信道是否连通 | `{"ok":true,"probed":N,"payload":"..."}` |
 
 ## TAB 样式下发
 
@@ -79,18 +79,39 @@ TCP 一行一个 JSON：
 - AEMobile 3.5.1+ 在玩家登录时反射读本服 `ServerUtilitiesConfig.tab.headerText/footerText`，
   通过 `tab_source` 上报给代理；内容没变不重复发。代理按子服缓存，玩家进服时下发。
 - **不用在每台后端填子服名**（3.5.2+）：后端上报自己 `server.properties` 的 `server-port`，
-  代理在 `servers:` 里按端口反查（如 25588 → `mgl`），命中时日志打
-  `tab_source: port 25588 -> backend 'mgl'`。端口对不上才退回手填的 `server`，再不行对所有子服生效。
+  代理在 `servers:` 里按端口反查（如 25588 → `mgl`），命中时日志输出
+  `tab_source: port 25588 -> backend 'mgl'`。端口未命中时退回手填的 `server`，仍未命中则对所有子服生效。
 - 生效优先级：`tab_set` 运行时覆盖 → 子服上报值 → `config.yml` 的 `tab.header/footer` → 内置中性文案。
 - 内置默认值刻意保持中性（只有 `{ONLINE}` / `{SERVER}`），仓库和 release 里不写具体服务器的
   群号或口号；要改文案请改 SU 配置，改完下一次有人登录就会上报（或手动发一次 `tab_source`）。
 - 插件注册 `SU|TabHF` 信道，向 ServerUtilities 发 `{"header":"...","footer":"..."}`（UTF-8 JSON，
   `\n` 换行、`&` 颜色码由客户端转 `§`），文案里的 `{PLAYER}` / `{SERVER}` / `{ONLINE}` 会替换成当前值。
-- `ServerConnectedEvent` 触发时客户端还在跑 FML 握手，握手期间的自定义负载会被丢掉，
-  所以按 `delays-ms` 阶梯重发；切服或断线后自动停止，不会往旧连接上发。
-- **客户端要求**：GTNH 整合包自带的 ServerUtilities。若 TAB 渲染权被别的模组抢走
-  （典型是 `BetterPingDisplay`，以及 `NecroTempus` 的 PlayerTab 模块），需要
-  [AEMobile](https://github.com/Huaxidesu/AEMobile) 3.5.0+ 的兜底钩子，或直接移除那些模组。
+- `ServerConnectedEvent` 触发时客户端还在跑 FML 握手，握手期间的自定义负载会被客户端丢弃，
+  所以按 `delays-ms` 阶梯重发；切服或断线后自动停止，不会向旧连接发送。
+- **客户端要求**：GTNH 整合包自带的 ServerUtilities，外加 [AEMobile](https://github.com/Huaxidesu/AEMobile)
+  3.5.0+ 的后备钩子（3.6.1 起还会自动处理下述冲突）。
+
+### TAB 重叠 / 页眉页脚不显示排查
+
+按 TAB 出现**两份列表叠在一起**，或页眉页脚不显示，本质都是三方抢同一个渲染事件
+（`RenderGameOverlayEvent.Pre` 的 `PLAYER_LIST`）：
+
+| 参与方 | 行为 |
+|---|---|
+| NecroTempus 的 PlayerTab | `PlayerTabEnabled=true` 时每帧先 `setCanceled(true)` 再自己画一份（无页眉页脚） |
+| AEMobile `TabOverlayHook`（3.5.0+） | 事件被抢占时撤销 cancel，直接调 SU 的 `ModernTabRenderer.render()` |
+| ServerUtilities mixin | 画带页眉页脚的现代 TAB |
+
+- NecroTempus 与 AEMobile 钩子同时在场 → Necro 画一份、SU 画一份 = **重叠**；
+- 只有 NecroTempus 在场（没装 AEMobile）→ SU 的渲染器永远执行不到 = **页眉页脚不显示**。
+- **修复**：客户端 `config/NecroTempusConfig.cfg` 里 `B:PlayerTab=false`；
+  AEMobile **3.6.1+** 客户端检测到 SU 时会在启动阶段自动停用它（日志搜
+  `检测到 NecroTempus 的 PlayerTab 已开启`），配置文件丢了也不会复发。
+- `BetterPingDisplay` 是同类冲突：在同一事件里 cancel 后整份重画原版 TAB，直接覆盖 SU 的渲染，
+  移除或禁用即可。
+- 排查这类问题先对比「正常的实例」和「异常的实例」的 mods 哈希与 `config/` 差异，不要急于修改代码。
+  实际案例：玩家导出包与测试实例的 mods 完全一致（含同 sha256 的 AEMobile 客户端包），
+  唯一差异是导出包缺 `NecroTempusConfig.cfg`、开关走默认 `true`，于是只有导出包重叠。
 
 ## 离线玩家
 
