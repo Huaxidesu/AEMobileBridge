@@ -167,7 +167,7 @@ TCP 一行一个 JSON：
 | 位置 | 配置项 | 作用 |
 |---|---|---|
 | 客户端 | `config/hodgepodge.cfg` → `tweaks.B:longerSentMessages` | GTNH 默认 `true`。Hodgepodge 的 `MixinC01PacketChatMessage_LongerMessages` 把 `C01PacketChatMessage` 构造器的截断值由原版 100 改成 **256**，`false` 时回到原版 100。GTNH 2.9.0 的该项是布尔值，**只有这两档**，没有可填数字的选项 |
-| 子服 | `config/gtnchat/config.yml` → `chat.max-length` | 数字，默认 256。GTNHChat 在服务端成型聊天时按此截断；客户端上的同名文件只影响单机，不影响发往代理的长度。调到小于单段长度时该段会被截掉 |
+| 子服 | `config/gtnchat/config.yml` → `chat.max-length` | 数字，默认 256。GTNHChat 在服务端成型聊天时按此截断。客户端上的同名文件只影响单机：实测改成 2000 后代理仍然只收到 256 字符，限制来自上表的 Hodgepodge 项。调到小于单段长度时该段会被截掉 |
 | 代理 | `plugins/AEMobileBridge/config.yml` → `chat-guard.max-length` | 数字，默认 500。总长超过此值的部分不发送 |
 
 三者关系：
