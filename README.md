@@ -7,6 +7,9 @@
 另外它也负责给 1.7.10 客户端下发 ServerUtilities 的现代 TAB 页眉页脚（`SU|TabHF` 信道），
 玩家进子服时自动重发，客户端无需改配置。详见下文「TAB 样式下发」。
 
+从 1.2.0 起还包含超长聊天守卫：玩家发出超过协议上限的聊天时，代理把内容拆成多条合法消息转发，
+避免整条连接被关闭。详见下文「超长聊天守卫」。
+
 ## 部署
 
 1. 把 `AEMobileBridge.jar` 放进 BC 的 `plugins/`；
@@ -40,6 +43,14 @@ tab:
   # 下面两项只是缺省/覆盖，内置默认值是中性的；真正的文案放在 SU 配置里
   header: "&b&l{ONLINE} &7位冒险者在线"    # 支持 \n 换行、& 颜色码
   footer: "&7本服: &b{SERVER}"
+chat-guard:
+  enabled: true
+  # 单条消息的总长上限（UTF-16 字符数）；协议上限由客户端版本决定，1.7.10 为 100，1.11+ 为 256
+  max-length: 500
+  # true 拆成多条发送；false 只截断到协议上限
+  split: true
+  # 是否向发送者提示处理结果
+  notify: true
 ```
 
 ## 协议
@@ -71,6 +82,7 @@ TCP 一行一个 JSON：
 | `tab_status` | 查看开关、下发档位、当前生效的文案，以及各子服上报的原文 | `{"ok":true,"enabled":true,"delays":[...],"header":"...","footer":"...","hasOverride":false,"serverSources":{...}}` |
 | `tab_set` | 临时覆盖文案，可传 `header` / `footer`；**只在内存里**，BC 重启失效，传空串表示清除 | `{"ok":true,"synced":N,"hasOverride":true}` |
 | `tab_probe` | 故意发一段坏 JSON，客户端会打印 `Failed to parse SU|TabHF packet`，用来确认信道是否连通 | `{"ok":true,"probed":N,"payload":"..."}` |
+| `chat_guard` | 查看超长聊天守卫的配置与计数；带 `"enabled":true/false` 时同时修改开关（只在内存，BC 重启失效） | `{"ok":true,"enabled":true,"maxLength":500,"split":true,"notify":true,"overLong":0,"splitMessages":0,"segments":0,"truncated":0,"rejectedCommands":0}` |
 
 ## TAB 样式下发
 
@@ -112,6 +124,50 @@ TCP 一行一个 JSON：
 - 排查这类问题先对比「正常的实例」和「异常的实例」的 mods 哈希与 `config/` 差异，不要急于修改代码。
   实际案例：玩家导出包与测试实例的 mods 完全一致（含同 sha256 的 AEMobile 客户端包），
   唯一差异是导出包缺 `NecroTempusConfig.cfg`、开关走默认 `true`，于是只有导出包重叠。
+
+## 超长聊天守卫
+
+1.7.10 客户端发出超过 100 个 UTF-16 单元的聊天时，代理会直接关闭整条连接，玩家表现为「连接已丢失」，
+服务端日志只有一句 `lost connection: Disconnected`。原因是 `UpstreamBridge.handle(Chat)` 在构造
+`ChatEvent` **之前**执行长度校验，超限抛出 `IllegalArgumentException`，`HandlerBoss.exceptionCaught`
+随即断开连接。
+
+这个位置决定了可选的实现方式：
+
+| 位置 | 能否阻止断线 | 原因 |
+|---|---|---|
+| 代理管道（本插件，`inbound-boss` 之前） | 能 | 校验发生在更靠后的处理器里，此处可以改写消息 |
+| 子服 Forge 模组（含 GTNHChat） | 不能 | 代理在转发之前就断开了，子服收不到这条消息 |
+| 代理插件监听 `ChatEvent` | 不能 | 校验在事件构造之前 |
+
+**做法是拆分，不是改走自定义通道。** 每段都是合法的 `C01PacketChatMessage`，子服的禁言、过滤、
+聊天记录以及其他模组的 `ServerChatEvent` 全部照常生效。改走自定义负载通道（如 GTNHChat 的
+`gtnchat` 信道）可以做到内容无损，但会绕过 `NetHandlerPlayServer.processChatMessage` 的全部治理逻辑，
+被禁言的玩家只需改用长消息即可发言。
+
+行为说明：
+
+- 上限按客户端协议版本判定，与代理的校验保持一致：协议 315（1.11）起为 256 字符，之前为 100。
+- 总长超过 `chat-guard.max-length` 的部分截断，不会发送。
+- `chat-guard.split: true` 时拆成多条发送；`false` 时只截断到协议上限（用于对照验证）。
+- 以 `/` 开头的消息不拆分：拆开后第二段起会被子服当作普通聊天执行。这类消息不转发，
+  并向发送者输出「命令超过 N 字符，未发送」。
+- 拆分按 UTF-16 单元进行，末位是高位代理字符时回退一位，不会切出孤立的代理字符（emoji 每个占两个单元）。
+- 拆分后除首段外的各段不以 `/` 开头：代理会把 `/` 开头的消息交给 `dispatchCommand` 执行，
+  玩家可以在超长消息的切分点后植入命令。遇到这种情况会向前收窄切点（内容不变），
+  连续斜杠占满整段时才把一个斜杠换成全角。
+- 发送者会收到一条提示（`chat-guard.notify: false` 可关闭）。其他玩家看到的是连续的 N 条消息，
+  **目前不会合并回一条**；需要合并时再考虑代理与子服协同的方案。
+
+排查与验证：
+
+1. 服务端启动日志出现 `chatGuard=true` 表示配置已加载；
+2. 玩家登录后发一条超过 100 字符的聊天，应正常发出且不掉线；
+3. 通过 `chat_guard` op 查看计数：`overLong` 为超长消息数，`splitMessages` 为拆分次数，
+   `segments` 为总段数，`rejectedCommands` 为被拒绝的超长命令数；
+4. 若计数未增长，说明玩家连接的管道里没有装上守卫，检查日志中是否有 `聊天守卫注入失败`。
+
+`chat-guard.enabled: false` 时守卫不介入，保持 1.1.x 的行为（超长消息照旧断线），用于快速回滚与对照。
 
 ## 离线玩家
 

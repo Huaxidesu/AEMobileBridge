@@ -9,6 +9,7 @@ import com.google.gson.JsonPrimitive;
 import net.md_5.bungee.api.ProxyServer;
 import net.md_5.bungee.api.config.ServerInfo;
 import net.md_5.bungee.api.connection.ProxiedPlayer;
+import net.md_5.bungee.api.event.PostLoginEvent;
 import net.md_5.bungee.api.event.ServerConnectedEvent;
 import net.md_5.bungee.api.plugin.Listener;
 import net.md_5.bungee.api.plugin.Plugin;
@@ -62,6 +63,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
     private static final int DEFAULT_PORT = 44445;
     private static final int DEFAULT_CAPTURE_MS = 800;
 
+    private final ChatGuard chatGuard = new ChatGuard(this);
     private final Map<String, long[]> rate = new ConcurrentHashMap<String, long[]>();
     private final Set<String> offlinePermissions = new HashSet<String>();
     private final Set<String> allowedCommands = new HashSet<String>();
@@ -100,7 +102,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
         getProxy().getPluginManager().registerListener(this, this);
         getLogger().info("AEMobileBridge listening on " + bind + ":" + port
                 + " commands=" + allowedCommands + " prefixes=" + prefixes
-                + " tabEnabled=" + tabEnabled);
+                + " tabEnabled=" + tabEnabled + " chatGuard=" + chatGuard.isEnabled());
     }
 
     @Override
@@ -127,6 +129,15 @@ public final class AEMobileBridge extends Plugin implements Listener {
     // ------------------------------------------------------------ tab listener
 
     /**
+     * 玩家登录完成时安装聊天守卫。玩家到代理的管道在此后不再重建，
+     * 在这里注入可以保证之后所有聊天都经过守卫。
+     */
+    @EventHandler
+    public void onPostLogin(final PostLoginEvent event) {
+        chatGuard.inject(event.getPlayer());
+    }
+
+    /**
      * 玩家连上子服后按 {@link #tabDelaysMs} 逐次下发。
      *
      * <p>多次下发的原因：{@code ServerConnectedEvent} 触发时客户端还在跑 Forge 的 FML 握手
@@ -136,6 +147,9 @@ public final class AEMobileBridge extends Plugin implements Listener {
      */
     @EventHandler
     public void onServerConnected(final ServerConnectedEvent event) {
+        // 切服只重建代理到子服的管道，玩家到代理的连接不变；此处补充调用用于覆盖
+        // 管道被其他插件重建的情况，重复注入由幂等检查拦下。
+        chatGuard.inject(event.getPlayer());
         if (!tabEnabled) return;
         final ProxiedPlayer player = event.getPlayer();
         final String serverName = event.getServer() != null && event.getServer().getInfo() != null
@@ -255,6 +269,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
                 defaults.set("tab.prefer-server-config", true);
                 defaults.set("tab.header", DEFAULT_TAB_HEADER);
                 defaults.set("tab.footer", DEFAULT_TAB_FOOTER);
+                ChatGuard.writeDefaults(defaults);
                 provider.save(defaults, file);
             }
             Configuration c = provider.load(file);
@@ -281,6 +296,7 @@ public final class AEMobileBridge extends Plugin implements Listener {
             tabPreferServerConfig = c.getBoolean("tab.prefer-server-config", true);
             tabHeader = c.getString("tab.header", DEFAULT_TAB_HEADER);
             tabFooter = c.getString("tab.footer", DEFAULT_TAB_FOOTER);
+            chatGuard.configure(c);
         } catch (Throwable t) {
             getLogger().warning("config load failed, using defaults: " + t);
             allowedCommands.add("music");
@@ -507,6 +523,13 @@ public final class AEMobileBridge extends Plugin implements Listener {
                 out.addProperty("probed", count);
                 out.addProperty("payload", new String(bad, StandardCharsets.UTF_8));
                 return out;
+            }
+
+            if ("chat_guard".equals(op)) {
+                // 查询与运行时开关：只影响新注入的守卫与长度判断，已在管道中的守卫读同一份配置
+                boolean change = req.has("enabled");
+                Boolean value = change ? Boolean.valueOf(req.get("enabled").getAsBoolean()) : null;
+                return chatGuard.status(change, value);
             }
 
             if (!op.isEmpty() && !"exec".equals(op)) return error("UNKNOWN_OP");
