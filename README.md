@@ -138,11 +138,11 @@ TCP 一行一个 JSON：
 | 位置 | 能否阻止断线 | 原因 |
 |---|---|---|
 | 代理管道（本插件，`inbound-boss` 之前） | 能 | 校验发生在更靠后的处理器里，此处可以改写消息 |
-| 子服 Forge 模组（含 GTNHChat） | 不能 | 代理在转发之前就断开了，子服收不到这条消息 |
+| 子服 Forge 模组（含 AEMobileChat） | 不能 | 代理在转发之前就断开了，子服收不到这条消息 |
 | 代理插件监听 `ChatEvent` | 不能 | 校验在事件构造之前 |
 
 **做法是拆分，不是改走自定义通道。** 每段都是合法的 `C01PacketChatMessage`，子服的禁言、过滤、
-聊天记录以及其他模组的 `ServerChatEvent` 全部照常生效。改走自定义负载通道（如 GTNHChat 的
+聊天记录以及其他模组的 `ServerChatEvent` 全部照常生效。改走自定义负载通道（如 AEMobileChat 的
 `gtnchat` 信道）可以做到内容无损，但会绕过 `NetHandlerPlayServer.processChatMessage` 的全部治理逻辑，
 被禁言的玩家只需改用长消息即可发言。
 
@@ -167,7 +167,7 @@ TCP 一行一个 JSON：
 | 位置 | 配置项 | 作用 |
 |---|---|---|
 | 客户端 | `config/hodgepodge.cfg` → `tweaks.B:longerSentMessages` | GTNH 默认 `true`。Hodgepodge 的 `MixinC01PacketChatMessage_LongerMessages` 把 `C01PacketChatMessage` 构造器的截断值由原版 100 改成 **256**，`false` 时回到原版 100。GTNH 2.9.0 的该项是布尔值，**只有这两档**，没有可填数字的选项 |
-| 子服 | `config/gtnchat/config.yml` → `chat.max-length` | 数字，默认 256。GTNHChat 在服务端成型聊天时按此截断。客户端上的同名文件只影响单机：实测改成 2000 后代理仍然只收到 256 字符，限制来自上表的 Hodgepodge 项。调到小于单段长度时该段会被截掉 |
+| 子服 | `config/gtnchat/config.yml` → `chat.max-length` | 数字，默认 256。AEMobileChat 在服务端成型聊天时按此截断。客户端上的同名文件只影响单机：实测改成 2000 后代理仍然只收到 256 字符，限制来自上表的 Hodgepodge 项。调到小于单段长度时该段会被截掉 |
 | 代理 | `plugins/AEMobileBridge/config.yml` → `chat-guard.max-length` | 数字，默认 500。总长超过此值的部分不发送 |
 
 三者关系：
@@ -179,7 +179,7 @@ TCP 一行一个 JSON：
   或装了别的聊天 mod」的情况留余量，默认配置下不会触发截断。
 - 要严格限制长度，把 `chat-guard.max-length` 调到目标值（例如 200），超出部分由代理截断并向发送者提示；
   要让消息完整送达，保持它不小于客户端上限即可。
-- `chat.max-length` 应大于单段长度（100），否则子服会在 GTNHChat 成型时再截一次。
+- `chat.max-length` 应大于单段长度（100），否则子服会在 AEMobileChat 成型时再截一次。
 
 生效方式：改客户端配置后重启客户端；改 `chat-guard.max-length` 后重启代理
 （`chat_guard` op 只能在运行时切换 `enabled`，不改其它项）。实测 99 字符不介入，
