@@ -45,7 +45,8 @@ tab:
   footer: "&7本服: &b{SERVER}"
 chat-guard:
   enabled: true
-  # 单条消息的总长上限（UTF-16 字符数）；协议上限由客户端版本决定，1.7.10 为 100，1.11+ 为 256
+  # 单条消息的总长上限（UTF-16 字符数）；协议上限由客户端版本决定，1.7.10 为 100，1.11+ 为 256。
+  # 客户端实际能发多少由客户端的 hodgepodge.cfg（longerSentMessages）决定，见「长度上限由客户端配置决定」
   max-length: 500
   # true 拆成多条发送；false 只截断到协议上限
   split: true
@@ -159,15 +160,30 @@ TCP 一行一个 JSON：
 - 发送者会收到一条提示（`chat-guard.notify: false` 可关闭）。其他玩家看到的是连续的 N 条消息，
   **目前不会合并回一条**；需要合并时再考虑代理与子服协同的方案。
 
-### 客户端本身只发得出去 256
+### 长度上限由客户端配置决定
 
-GTNH 客户端装了 Hodgepodge，其中 `MixinC01PacketChatMessage_LongerMessages` 把
-`C01PacketChatMessage` 构造器的截断值由原版 100 改成 **256**（`TweaksConfig.longerSentMessages`）。
-也就是说玩家端能发出去的单条消息最多 256 字符，**再多在客户端就被砍掉了，根本到不了代理**。
+客户端能发出多少字，由客户端自己的配置决定，代理无法改变；代理侧只能决定「收到后怎么处理」。
 
-因此线上实际发生的是：256 字符的消息 → 代理拆成 3 段（100 + 100 + 56）。
-`chat-guard.max-length: 500` 只在换了客户端（不装 Hodgepodge 或改掉这个开关）时才有意义，
-默认配置下永远不会触发截断。实测 99 字符不介入，101 字符拆 2 段，256 字符拆 3 段。
+| 位置 | 配置项 | 作用 |
+|---|---|---|
+| 客户端 | `config/hodgepodge.cfg` → `tweaks.B:longerSentMessages` | GTNH 默认 `true`。Hodgepodge 的 `MixinC01PacketChatMessage_LongerMessages` 把 `C01PacketChatMessage` 构造器的截断值由原版 100 改成 **256**，`false` 时回到原版 100。GTNH 2.9.0 的该项是布尔值，**只有这两档**，没有可填数字的选项 |
+| 子服 | `config/gtnchat/config.yml` → `chat.max-length` | 数字，默认 256。GTNHChat 在服务端成型聊天时按此截断；客户端上的同名文件只影响单机，不影响发往代理的长度。调到小于单段长度时该段会被截掉 |
+| 代理 | `plugins/AEMobileBridge/config.yml` → `chat-guard.max-length` | 数字，默认 500。总长超过此值的部分不发送 |
+
+三者关系：
+
+- 客户端上限（100 或 256）先起作用。超出的字符在客户端就被截掉，到不了代理，代理也补不回来。
+  想让玩家发更长的内容，只能改客户端：`B:longerSentMessages=true`（256）已是 GTNH 提供的最大值。
+- `chat-guard.max-length` 只在小于客户端上限时才真正生效。GTNH 默认客户端为 256，
+  线上实际形态是 256 字符拆 3 段（100 + 100 + 56），默认 500 是给「客户端被改过、
+  或装了别的聊天 mod」的情况留余量，默认配置下不会触发截断。
+- 要严格限制长度，把 `chat-guard.max-length` 调到目标值（例如 200），超出部分由代理截断并向发送者提示；
+  要让消息完整送达，保持它不小于客户端上限即可。
+- `chat.max-length` 应大于单段长度（100），否则子服会在 GTNHChat 成型时再截一次。
+
+生效方式：改客户端配置后重启客户端；改 `chat-guard.max-length` 后重启代理
+（`chat_guard` op 只能在运行时切换 `enabled`，不改其它项）。实测 99 字符不介入，
+101 字符拆 2 段，256 字符拆 3 段。
 
 排查与验证：
 
