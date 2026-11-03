@@ -159,6 +159,16 @@ TCP 一行一个 JSON：
 - 发送者会收到一条提示（`chat-guard.notify: false` 可关闭）。其他玩家看到的是连续的 N 条消息，
   **目前不会合并回一条**；需要合并时再考虑代理与子服协同的方案。
 
+### 客户端本身只发得出去 256
+
+GTNH 客户端装了 Hodgepodge，其中 `MixinC01PacketChatMessage_LongerMessages` 把
+`C01PacketChatMessage` 构造器的截断值由原版 100 改成 **256**（`TweaksConfig.longerSentMessages`）。
+也就是说玩家端能发出去的单条消息最多 256 字符，**再多在客户端就被砍掉了，根本到不了代理**。
+
+因此线上实际发生的是：256 字符的消息 → 代理拆成 3 段（100 + 100 + 56）。
+`chat-guard.max-length: 500` 只在换了客户端（不装 Hodgepodge 或改掉这个开关）时才有意义，
+默认配置下永远不会触发截断。实测 99 字符不介入，101 字符拆 2 段，256 字符拆 3 段。
+
 排查与验证：
 
 1. 服务端启动日志出现 `chatGuard=true` 表示配置已加载；

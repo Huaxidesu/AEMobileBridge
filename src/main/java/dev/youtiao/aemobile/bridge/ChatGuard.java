@@ -169,6 +169,8 @@ final class ChatGuard {
         private void handleLongChat(ChannelHandlerContext ctx, PacketWrapper wrapper,
                                     Chat chat, String text, int limit) {
             overLongCount.incrementAndGet();
+            plugin.getLogger().info("[ChatGuard] " + player.getName() + " 超长聊天 " + text.length()
+                    + " 字符（协议上限 " + limit + "，总上限 " + maxLength + "）");
 
             if (!enabled) {
                 // 守卫停用时保持原有行为，便于对照验证与快速回滚
@@ -198,13 +200,15 @@ final class ChatGuard {
             if (parts.size() > 1) {
                 splitMessageCount.incrementAndGet();
                 segmentCount.addAndGet(parts.size());
-                if (notify) {
+            }
+            // 与分段计数相互独立：超长被 maxLength 截掉的部分单独记一次
+            if (cut) truncatedCount.incrementAndGet();
+
+            if (notify) {
+                if (parts.size() > 1) {
                     notifySender("消息超过 " + limit + " 字符，已分 " + parts.size() + " 条发送"
-                            + (cut ? "（单条上限 " + maxLength + " 字符，超出部分未发送）" : ""));
-                }
-            } else {
-                truncatedCount.incrementAndGet();
-                if (notify) {
+                            + (cut ? "（总长上限 " + maxLength + " 字符，超出部分未发送）" : ""));
+                } else {
                     notifySender("消息超过 " + limit + " 字符，已截断至 " + parts.get(0).length() + " 字符");
                 }
             }
